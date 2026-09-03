@@ -19,15 +19,16 @@ reference but are not used by anything here anymore.
 windrose-docker/
   docker-compose.yml
   .env.example
-  stage-save.ps1         run on Windows to prepare a world for upload
+  stage-save.ps1         run on Windows to prepare a world for transfer
+  add-world.sh           run on the server to bring a staged world into the volume
+  select-world.sh        run on the server to pick which world loads, and restart
   legacy-wine-setup/     obsolete, kept for reference only
-  seed/                  obsolete Wine-era world export, safe to delete
 ```
 
 Two services: `init-container` (one-shot, fixes save-volume ownership on
-every start) and `windrose-server` (the game). World migration below is done
-straight from the command line via a throwaway helper container — no web UI,
-no extra exposed port.
+every start) and `windrose-server` (the game). World migration and switching
+below is done straight from the command line via throwaway helper
+containers — no web UI, no extra exposed port.
 
 ## Steps
 
@@ -69,36 +70,28 @@ copied over as-is; the game engine restores them internally (that's what
    .\stage-save.ps1 -Verify
    ```
    This produces `migration-staging\SaveProfiles\Default\RocksDB_v2_Backups\Worlds\<WorldId>\<WorldId>_<GameVersion>_Latest.zip`.
-3. Copy the whole staged tree to the server:
+3. Copy the zip to the server (just the file, not the whole staged tree):
    ```powershell
-   scp -r .\migration-staging\SaveProfiles nathan@<server-ip>:/opt/windrose-docker/migration-staging/
+   scp .\migration-staging\SaveProfiles\Default\RocksDB_v2_Backups\Worlds\<WorldId>\<WorldId>_<GameVersion>_Latest.zip nathan@<server-ip>:/opt/windrose-docker/
    ```
-4. On the server, drop it straight into the save volume and fix ownership
-   with a throwaway container — no need to run `windrose-server` or anything
-   else for this:
+4. On the server, bring it into the save volume:
    ```bash
    cd /opt/windrose-docker
-   docker run --rm -v windrose-save-dir:/v -v "$(pwd)/migration-staging":/src:ro alpine:3.23 sh -c "
-     cp -a /src/SaveProfiles/Default/RocksDB_v2_Backups/Worlds/. /v/SaveProfiles/Default/RocksDB_v2_Backups/Worlds/ &&
-     chown -R 10001:10001 /v/SaveProfiles/Default/RocksDB_v2_Backups/Worlds
-   "
+   ./add-world.sh <WorldId>_<GameVersion>_Latest.zip
    ```
-   The server only ever recognizes worlds under the `Default` profile, not
-   your Steam ID — that's why the staged path says `Default` regardless of
-   whose save this is. Sanity-check the result before moving on:
+   This places it under the `Default` profile (the server only ever
+   recognizes worlds there, not your Steam ID) and fixes ownership. It
+   doesn't touch `.env` or restart anything by itself.
+5. Load it:
    ```bash
-   docker run --rm -v windrose-save-dir:/v alpine:3.23 \
-     find /v/SaveProfiles/Default/RocksDB_v2_Backups/Worlds -maxdepth 2
+   ./select-world.sh
    ```
-   You should see `.../Worlds/<WorldId>/<WorldId>_<GameVersion>_Latest.zip`
-   — the zip itself, still zipped.
-5. In `.env`, set `WORLD_ISLAND_ID` to that world's folder name and make sure
-   `AUTO_LOAD_LATEST_BACKUP_IF_HAS_BROKEN=true` (the default in
-   `.env.example`), then:
-   ```bash
-   docker compose up -d
-   docker compose logs -f windrose-server
-   ```
+   Lists every world currently in the volume and prompts you to pick one
+   (or pass a world ID directly to skip the prompt: `./select-world.sh
+   <WorldId>`). It sets `WORLD_ISLAND_ID` in `.env` and restarts the server
+   for you. Make sure `AUTO_LOAD_LATEST_BACKUP_IF_HAS_BROKEN=true` (the
+   default in `.env.example`) — that's what actually performs the restore
+   below.
 
 **Expect one or two restarts before it takes.** The server validates
 `WORLD_ISLAND_ID` against what's currently live under `RocksDB_v2` — which
@@ -113,6 +106,22 @@ World with WORLD_ISLAND_ID <id> does not exist. Available worlds: [...]
 restores your world from `_Backups` into the live `RocksDB_v2/<version>/`
 path itself (that's what `AUTO_LOAD_LATEST_BACKUP_IF_HAS_BROKEN` does). Give
 it a minute or two of restarts rather than assuming it's stuck.
+
+## Switching between worlds
+
+Every world you've ever brought over with `add-world.sh` stays in the
+volume under `RocksDB_v2_Backups` — nothing gets deleted when you switch
+away from it. To change which one the server loads, no re-transfer needed:
+
+```bash
+./select-world.sh
+```
+
+Lists every world currently in the volume (with its last-backup timestamp)
+and prompts you to pick one, or pass a world ID directly to skip the prompt.
+It updates `WORLD_ISLAND_ID` in `.env` and restarts the server. Same
+one-or-two-restarts caveat as above applies while it restores from
+`_Backups`.
 
 ### Cleaning up stray worlds
 
