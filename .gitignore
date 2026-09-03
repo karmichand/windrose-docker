@@ -1,0 +1,10 @@
+# Real server config (invite code, password) -- copy .env.example instead
+.env
+
+# Personal world save data staged for migration -- never belongs in git
+migration-staging/
+seed/
+
+# OS cruft
+.DS_Store
+Thumbs.db
